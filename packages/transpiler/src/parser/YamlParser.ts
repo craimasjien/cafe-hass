@@ -746,8 +746,9 @@ export class YamlParser {
 
   /**
    * Extract target node IDs from a synthetic __parallel_trigger_* block's parallel items.
-   * Each parallel branch is tagged with an alias of the form "parallel_branch:<nodeId>"
-   * by the transpiler, making identification straightforward.
+   * Supports two formats:
+   * - New: each branch tagged with alias "parallel_branch:<nodeId>"
+   * - Legacy: system_log.write with data.message "Node: <nodeId>"
    */
   private extractParallelTargetIds(parallelItems: unknown[] | undefined): string[] {
     if (!parallelItems) return [];
@@ -758,11 +759,25 @@ export class YamlParser {
       const pItem = item as Record<string, unknown>;
       const alias = pItem.alias as string | undefined;
 
-      // Each branch is tagged: { alias: "parallel_branch:<nodeId>", ... }
+      // New format: { alias: "parallel_branch:<nodeId>", ... }
       if (alias) {
         const branchMatch = alias.match(/^parallel_branch:(.+)$/);
         if (branchMatch) {
           targetIds.push(branchMatch[1]);
+          continue;
+        }
+      }
+
+      // Legacy format: { action: "system_log.write", data: { message: "Node: <nodeId>" } }
+      const action = (pItem.service ?? pItem.action) as string | undefined;
+      if (action === 'system_log.write') {
+        const data = pItem.data as Record<string, unknown> | undefined;
+        const message = data?.message as string | undefined;
+        if (message) {
+          const nodeMatch = message.match(/^Node:\s*(.+)$/);
+          if (nodeMatch) {
+            targetIds.push(nodeMatch[1]);
+          }
         }
       }
     }

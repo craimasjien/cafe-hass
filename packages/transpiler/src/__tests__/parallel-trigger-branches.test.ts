@@ -195,6 +195,125 @@ describe('Parallel Trigger Branches', () => {
     expect(result.yaml).toContain('action_A');
   });
 
+  it('should parse legacy system_log.write parallel blocks without phantom nodes', async () => {
+      // YAML produced by an older transpiler version where non-action parallel
+      // targets were emitted as system_log.write placeholders instead of
+      // parallel_branch: aliases.
+      const legacyYaml = `
+alias: Legacy Parallel
+description: ""
+triggers:
+  - trigger: time
+    at: "09:00:00"
+  - trigger: time
+    at: "21:00:00"
+conditions: []
+actions:
+  - variables:
+      current_node: >-
+        {% if trigger.idx == "0" %}__parallel_trigger_0{% elif trigger.idx == "1" %}action_C{% else %}END{% endif %}
+      flow_context: {}
+  - repeat:
+      until:
+        - condition: template
+          value_template: "{{ current_node == \\"END\\" }}"
+      sequence:
+        - choose:
+            - conditions:
+                - condition: template
+                  value_template: "{{ current_node == \\"__parallel_trigger_0\\" }}"
+              sequence:
+                - parallel:
+                    - data:
+                        message: "Node: condition_X"
+                      action: system_log.write
+                    - data:
+                        message: "Node: condition_Y"
+                      action: system_log.write
+                - variables:
+                    current_node: END
+            - conditions:
+                - condition: template
+                  value_template: "{{ current_node == \\"condition_X\\" }}"
+              sequence:
+                - variables:
+                    current_node: >-
+                      {% if is_state('binary_sensor.door', 'on') %}action_A{% else %}END{% endif %}
+            - conditions:
+                - condition: template
+                  value_template: "{{ current_node == \\"condition_Y\\" }}"
+              sequence:
+                - variables:
+                    current_node: >-
+                      {% if is_state('binary_sensor.window', 'on') %}action_B{% else %}END{% endif %}
+            - conditions:
+                - condition: template
+                  value_template: "{{ current_node == \\"action_A\\" }}"
+              sequence:
+                - alias: Door Light
+                  action: light.turn_on
+                - variables:
+                    current_node: END
+            - conditions:
+                - condition: template
+                  value_template: "{{ current_node == \\"action_B\\" }}"
+              sequence:
+                - alias: Window Fan
+                  action: switch.turn_on
+                - variables:
+                    current_node: END
+            - conditions:
+                - condition: template
+                  value_template: "{{ current_node == \\"action_C\\" }}"
+              sequence:
+                - alias: Lights Off
+                  action: light.turn_off
+                - variables:
+                    current_node: END
+mode: single
+variables:
+  _cafe_metadata:
+    version: 1
+    strategy: native
+    nodes:
+      trigger_0: { x: 0, "y": 0 }
+      trigger_1: { x: 0, "y": 300 }
+      condition_X: { x: 300, "y": -100 }
+      condition_Y: { x: 300, "y": 100 }
+      action_A: { x: 600, "y": -100 }
+      action_B: { x: 600, "y": 100 }
+      action_C: { x: 300, "y": 300 }
+`;
+
+      const parser = new YamlParser();
+      const result = await parser.parse(legacyYaml);
+
+      expect(result.success).toBe(true);
+      expect(result.graph).toBeDefined();
+
+      const parsed = result.graph!;
+
+      // No phantom __parallel_trigger_* nodes
+      const phantomNodes = parsed.nodes.filter((n) => n.id.startsWith('__parallel_trigger_'));
+      expect(phantomNodes).toHaveLength(0);
+
+      // Find triggers by type
+      const triggerNodes = parsed.nodes.filter(isTriggerNode);
+      expect(triggerNodes).toHaveLength(2);
+
+      // The first trigger (09:00) should have edges to both condition_X and condition_Y
+      const trigger0 = triggerNodes[0];
+      const trigger0Edges = parsed.edges.filter((e) => e.source === trigger0.id);
+      expect(trigger0Edges).toHaveLength(2);
+      expect(trigger0Edges.map((e) => e.target).sort()).toEqual(['condition_X', 'condition_Y']);
+
+      // The second trigger (21:00) should have an edge to action_C
+      const trigger1 = triggerNodes[1];
+      const trigger1Edges = parsed.edges.filter((e) => e.source === trigger1.id);
+      expect(trigger1Edges).toHaveLength(1);
+      expect(trigger1Edges[0].target).toBe('action_C');
+    });
+
   describe('round-trip (transpile → parse)', () => {
     it('should not create phantom nodes for __parallel_trigger_* entries', async () => {
       const flow: FlowGraph = {
