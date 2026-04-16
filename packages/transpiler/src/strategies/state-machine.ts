@@ -74,15 +74,26 @@ export class StateMachineStrategy extends BaseStrategy {
       };
     }
 
-    // Build choose blocks for each non-trigger node
-    const nodeBlocks = flow.nodes
-      .filter((n) => n.type !== 'trigger')
-      .map((node) => this.generateNodeBlock(flow, node));
-
     // Generate parallel entry blocks for triggers with multiple targets
     const parallelEntryBlocks = this.generateParallelEntryBlocks(flow, triggerRouting);
 
-    // Combine node blocks and parallel entry blocks
+    // Collect node IDs consumed by parallel branches so they aren't
+    // duplicated as standalone state-machine choose entries
+    const parallelConsumedNodeIds = new Set<string>();
+    for (const [, targets] of triggerRouting) {
+      if (targets.length > 1) {
+        for (const targetId of targets) {
+          this.collectSubgraphNodeIds(flow, targetId, parallelConsumedNodeIds);
+        }
+      }
+    }
+
+    // Build choose blocks for each non-trigger node not already inlined in a parallel branch
+    const nodeBlocks = flow.nodes
+      .filter((n) => n.type !== 'trigger' && !parallelConsumedNodeIds.has(n.id))
+      .map((node) => this.generateNodeBlock(flow, node));
+
+    // Combine parallel entry blocks and remaining node blocks
     const chooseBlocks = [...parallelEntryBlocks, ...nodeBlocks];
 
     // Warn about potential infinite loops
@@ -310,6 +321,34 @@ export class StateMachineStrategy extends BaseStrategy {
   }
 
   /**
+   * Collect all node IDs reachable from a starting node (used to identify
+   * nodes that are already inlined inside parallel branches).
+   */
+  private collectSubgraphNodeIds(flow: FlowGraph, nodeId: string, collected: Set<string>): void {
+    if (nodeId === 'END' || collected.has(nodeId)) return;
+
+    const node = flow.nodes.find((n) => n.id === nodeId);
+    if (!node || node.type === 'trigger') return;
+
+    collected.add(nodeId);
+    const edges = this.getOutgoingEdges(flow, node.id);
+    for (const edge of edges) {
+      this.collectSubgraphNodeIds(flow, edge.target, collected);
+    }
+  }
+
+  /**
+   * Encode a C.A.F.E. node ID into the alias field so it survives the HA round-trip.
+   * Format: "cafe_node:<nodeId>" or "cafe_node:<nodeId>:<userAlias>"
+   */
+  private encodeNodeIdInAlias(action: Record<string, unknown>, nodeId: string): void {
+    const existingAlias = action.alias as string | undefined;
+    action.alias = existingAlias
+      ? `cafe_node:${nodeId}:${existingAlias}`
+      : `cafe_node:${nodeId}`;
+  }
+
+  /**
    * Generate an inline HA action sequence for a subgraph starting at the given node.
    * Used within parallel branches where each branch must be self-contained
    * (no current_node state machine variable).
@@ -332,6 +371,7 @@ export class StateMachineStrategy extends BaseStrategy {
     switch (node.type) {
       case 'action': {
         const actionCall = this.buildActionCall(node as ActionNode);
+        this.encodeNodeIdInAlias(actionCall, node.id);
         const nextNodeId = edges[0]?.target ?? 'END';
         return [actionCall, ...this.generateInlineBranch(flow, nextNodeId, visited)];
       }
@@ -352,6 +392,7 @@ export class StateMachineStrategy extends BaseStrategy {
           if: [condition],
           then: thenActions,
         };
+        this.encodeNodeIdInAlias(ifBlock, node.id);
         if (elseActions.length > 0) {
           ifBlock.else = elseActions;
         }
@@ -360,18 +401,21 @@ export class StateMachineStrategy extends BaseStrategy {
 
       case 'delay': {
         const delayAction = this.buildDelayAction(node as DelayNode);
+        this.encodeNodeIdInAlias(delayAction, node.id);
         const nextNodeId = edges[0]?.target ?? 'END';
         return [delayAction, ...this.generateInlineBranch(flow, nextNodeId, visited)];
       }
 
       case 'wait': {
         const waitAction = this.buildWaitAction(node as WaitNode);
+        this.encodeNodeIdInAlias(waitAction, node.id);
         const nextNodeId = edges[0]?.target ?? 'END';
         return [waitAction, ...this.generateInlineBranch(flow, nextNodeId, visited)];
       }
 
       case 'set_variables': {
         const setVarsAction = this.buildSetVariablesAction(node as SetVariablesNode);
+        this.encodeNodeIdInAlias(setVarsAction, node.id);
         const nextNodeId = edges[0]?.target ?? 'END';
         return [setVarsAction, ...this.generateInlineBranch(flow, nextNodeId, visited)];
       }
