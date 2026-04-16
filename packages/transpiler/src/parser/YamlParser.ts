@@ -575,7 +575,7 @@ export class YamlParser {
     for (const [nodeId, info] of nodeInfoMap) {
       if (!/^__parallel_trigger_\d+$/.test(nodeId)) continue;
 
-      const targetIds = this.extractParallelTargetIds(info.parallelItems, nodeInfoMap);
+      const targetIds = this.extractParallelTargetIds(info.parallelItems);
       if (targetIds.length > 0) {
         parallelTriggerTargets.set(nodeId, targetIds);
       }
@@ -746,50 +746,23 @@ export class YamlParser {
 
   /**
    * Extract target node IDs from a synthetic __parallel_trigger_* block's parallel items.
-   * Non-action nodes use system_log.write with "Node: <id>" messages.
-   * Action nodes are matched against nodeInfoMap by comparing action properties.
+   * Each parallel branch is tagged with an alias of the form "parallel_branch:<nodeId>"
+   * by the transpiler, making identification straightforward.
    */
-  private extractParallelTargetIds(
-    parallelItems: unknown[] | undefined,
-    nodeInfoMap: Map<string, { nodeType: string; data: Record<string, unknown> }>
-  ): string[] {
+  private extractParallelTargetIds(parallelItems: unknown[] | undefined): string[] {
     if (!parallelItems) return [];
 
     const targetIds: string[] = [];
-    const matchedNodeIds = new Set<string>();
 
     for (const item of parallelItems) {
       const pItem = item as Record<string, unknown>;
-      const service = (pItem.service || pItem.action) as string | undefined;
+      const alias = pItem.alias as string | undefined;
 
-      // Non-action nodes: { service: 'system_log.write', data: { message: 'Node: <id>' } }
-      if (service === 'system_log.write') {
-        const data = pItem.data as Record<string, unknown> | undefined;
-        const message = data?.message as string | undefined;
-        if (message) {
-          const nodeMatch = message.match(/^Node:\s*(.+)$/);
-          if (nodeMatch) {
-            targetIds.push(nodeMatch[1]);
-            continue;
-          }
-        }
-      }
-
-      // Action nodes: match by comparing action properties against nodeInfoMap
-      if (service) {
-        for (const [candidateId, info] of nodeInfoMap) {
-          if (matchedNodeIds.has(candidateId)) continue;
-          if (info.nodeType !== 'action') continue;
-
-          const cService = info.data.service as string | undefined;
-          if (service !== cService) continue;
-          if (pItem.alias !== info.data.alias) continue;
-          if (JSON.stringify(pItem.target) !== JSON.stringify(info.data.target)) continue;
-          if (JSON.stringify(pItem.data) !== JSON.stringify(info.data.data)) continue;
-
-          targetIds.push(candidateId);
-          matchedNodeIds.add(candidateId);
-          break;
+      // Each branch is tagged: { alias: "parallel_branch:<nodeId>", ... }
+      if (alias) {
+        const branchMatch = alias.match(/^parallel_branch:(.+)$/);
+        if (branchMatch) {
+          targetIds.push(branchMatch[1]);
         }
       }
     }
